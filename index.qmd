@@ -1,0 +1,394 @@
+---
+title: Comparing Psychometric and Subjective Adequacy Assessment of Response Scales with Differing Lengths in PHQ-9 and CESD-10
+authors:
+  - name: Norah Jones
+    affiliation: The University
+    roles: writing
+    corresponding: true
+bibliography: references.bib
+format: 
+  html: 
+    code-fold: true
+    code-summary: "Show the code"
+---
+
+## Section
+
+## Results
+
+```{r}
+#| label: load_libraries_data
+#| warnings: false
+#| message: false
+#| output: false
+
+# Load libraries
+library(ggplot2)
+library(gridExtra)
+library(reshape2)
+library(psych)
+library(knitr)
+library(kableExtra)
+library(ggiraph)
+library(plotly)
+library(tidyr)
+library(dplyr)
+library(patchwork)
+library(tools)
+
+# Load data
+load("full_data.RData")
+load("scales_items_names_labels.RData")
+
+# Extract necessary variables from scales_item_names
+phq_item_names <- scales_items_names_labels$phq_item_names
+phq_item_labels <- scales_items_names_labels$phq_item_labels
+cl_phq_item_names <- scales_items_names_labels$cl_phq_item_names
+
+
+# Define color palette
+palette <- c("#5a9097", "#D76CB8", "#AD4FE3", "#7DE5AB", "#D6D8B0", "#D8855E", "#898EDA", "#D2B9CF", "#BEE15A")
+```
+
+```{r}
+#| label: prepare_data_frames
+
+#### Prepare PHQ-9 scores and Adequacy and Effort data ####
+data <- list()
+
+for (i in 1:length(full_data)) {
+    data[[i]] <- full_data[[i]][,c(phq_item_names, cl_phq_item_names)]
+}
+
+# Check missing in data list per element and per column
+missing <- lapply(data, function(x) colSums(is.na(x)))
+
+# Where missing, replace with mode for the column
+# Define the get_mode function
+get_mode <- function(v) {
+    v <- v[!is.na(v)]  # Remove NA values
+    uniqv <- unique(v)
+    uniqv[which.max(tabulate(match(v, uniqv)))]
+}
+
+# Updated loop
+for (i in 1:length(data)) {
+    for (j in 1:ncol(data[[i]])) {
+        if (missing[[i]][j] > 0) {
+            mode_value <- get_mode(data[[i]][,j])
+            data[[i]][,j] <- ifelse(is.na(data[[i]][,j]), mode_value, data[[i]][,j])
+        }
+    }
+}
+
+# Calculate sum scores of PHQ-9 and EFFORT
+for (i in 1:length(data)) {
+    data[[i]]$phq_score <- rowSums(data[[i]][,phq_item_names])
+    data[[i]]$cl_phq6_r <- 6-data[[i]]$cl_phq6
+    data[[i]]$cl_phq9_r <- 6-data[[i]]$cl_phq9
+    data[[i]]$cl_phq_sp_adequacy <- rowMeans(data[[i]][,c("cl_phq3", "cl_phq6_r", "cl_phq9_r")])
+    data[[i]]$cl_phq_cogn_effort <- rowMeans(data[[i]][,c("cl_phq1", "cl_phq4", "cl_phq7")])
+    data[[i]]$cl_phq_emo_effort <- rowMeans(data[[i]][,c("cl_phq2", "cl_phq5", "cl_phq8")])
+}
+
+descriptives <- list()
+for(i in 1:length(data)){
+    temp <- data[[i]][,c("cl_phq_sp_adequacy", "cl_phq_cogn_effort", "cl_phq_emo_effort")]
+    results <- describe(temp)
+    results <- results[, c(-1, -6, -8, -9, -10, -13)]
+    colnames(results) <- c("n", "M", "SD", "Mdn", "MAD", "Sk", "Ku")
+    descriptives[[i]] <- results
+}
+
+adequacy_effort_means <- data.frame(Scale = 1:20, 
+                                    Adequacy = sapply(descriptives, function(x) x[1, "M"]),
+                                    Cognitive_Effort = sapply(descriptives, function(x) x[2, "M"]),
+                                    Emotional_Effort = sapply(descriptives, function(x) x[3, "M"]))
+
+#### Prepare PHQ-9 Item Total Correlations ####
+
+# Calculate item-total correlations using lapply
+IT_cor_col_names <- paste0(phq_item_names, "_IT_cor")
+IT_cor_list <- lapply(seq_along(full_data), function(j) { 
+    current_data <- full_data[[j]] 
+    total_scores <- rowSums(current_data[, phq_item_names], na.rm = TRUE) 
+    item_total_corr <- sapply(phq_item_names, function(item) { 
+        cor(current_data[[item]], total_scores - current_data[[item]], use = "pairwise.complete.obs") 
+    }) 
+    data.frame(Item = IT_cor_col_names, Correlation = item_total_corr, Dataset = j) 
+}) 
+
+# Combine the list of data frames into a single data frame
+IT_cor_df <- do.call(rbind, 
+                     lapply(seq_along(IT_cor_list), function(i) {
+                         # Add the index 'i' as a new column 'ID' to each data frame in the list
+                         df <- IT_cor_list[[i]]
+                         df$Scale <- i  # Assign the index as an identifier
+                         return(df)
+                     })
+)
+
+#convert to wide based on item
+IT_cor_df_wide <- dcast(IT_cor_df, Scale ~ Item, value.var = "Correlation")
+
+# merge data_means and IT_cor_df_wide by scale
+IT_cor_effort_merged <- merge(adequacy_effort_means, IT_cor_df_wide, by = "Scale")
+
+# Create transformed variables dataset on a range from 0 to 1 
+scale_to_0_1 <- function(x, new_min = 0, new_max = 1) {
+    (x - min(x, na.rm = TRUE)) / (max(x, na.rm = TRUE) - min(x, na.rm = TRUE)) * (new_max - new_min) + new_min
+}
+
+IT_cor_scaled <- IT_cor_effort_merged %>%
+    mutate(across(-all_of("Scale"), scale_to_0_1))
+
+IT_cor_effort_cor <- list()
+effort_vars <- c("Adequacy", "Cognitive_Effort", "Emotional_Effort")
+for(var in effort_vars){
+    df_to_store <- data.frame(Item = c(rep(NA, length(phq_item_names))), 
+                              Correlation = c(rep(NA, length(phq_item_names))), 
+                              Correlation_Lower = c(rep(NA, length(phq_item_names))), 
+                              Correlation_Upper = c(rep(NA, length(phq_item_names))))
+    
+    for(item in IT_cor_col_names){
+        data_temp <- IT_cor_scaled[,c("Scale", item, var)]
+        data_temp <- data_temp[-1,]
+        cor_temp <- cor.test(data_temp[,c(var)], data_temp[,c(item)], method = "pearson")
+        cor_temp_est <- cor_temp$estimate
+        cor_temp_lower <- cor_temp$conf.int[1]
+        cor_temp_upper <- cor_temp$conf.int[2]
+        item_pos <- which(IT_cor_col_names == item)
+        df_to_store$Item[item_pos] <- item
+        df_to_store$Correlation[item_pos] <- cor_temp_est
+        df_to_store$Correlation_Lower[item_pos] <- cor_temp_lower
+        df_to_store$Correlation_Upper[item_pos] <- cor_temp_upper
+    }
+    IT_cor_effort_cor[[var]] <- df_to_store
+}
+
+```
+
+```{r}
+#| label: plots_for_IT_cor_adequacy_effort
+
+IT_adequacy_effort_list <- list()
+IT_adequacy_effort_trends <- list()
+effort_vars <- c("Adequacy", "Cognitive_Effort", "Emotional_Effort")
+for(var in effort_vars){
+    plot_list <- list()
+    plot_list_trend <- list()
+    for(item in IT_cor_col_names){
+        
+        data_temp <- IT_cor_scaled[,c("Scale", item, var)]
+        data_temp <- data_temp[-1,]
+        data_temp$Difference <- data_temp[[var]] - data_temp[[item]]
+        #convert to long
+        data_temp_long <- melt(data_temp, id.vars = c("Scale"), 
+                               variable.name = "Variable", value.name = "Value")
+        
+        x_min <- min(data_temp_long$Scale)
+        x_max <- max(data_temp_long$Scale)
+        
+       plot_scale_trends <- ggplot(data = data_temp_long, aes(x = Scale, y = Value, color = Variable, group = Variable)) +
+            geom_point(size = 1) +
+            geom_line(linewidth = 1) + 
+            scale_x_continuous(breaks = seq(x_min, x_max, 1)) +
+            labs(x = "Scale", y = paste(var, "Effort Value", sep = " "), title = toTitleCase(phq_item_names[which(IT_cor_col_names == item)])) +
+            theme(legend.position = "bottom")
+        
+        # Create the label text
+        label_text <- paste0(
+            "Correlation: ", round(cor_temp_est, 2),
+            "\nCI: [", round(cor_temp_lower, 2), ", ", round(cor_temp_upper, 2), "]")
+        data_cor_temp <- data_temp
+        colnames(data_cor_temp) <- c("Scale", "IT_cor", "Effort", "Difference")
+        
+        plot_cor <- ggplot(data = data_cor_temp, aes(x = Effort, y = IT_cor, color = Scale)) +
+            geom_point() +
+            labs(x = paste(var, "Effort Value", sep = " "), y = "Item Total Correlation",
+                 title = toTitleCase(item)) +
+            #remove legend
+            theme(legend.position = ifelse(item == "phq1", "right", "none")) +
+            annotate(
+                "text",
+                x = 0,
+                y = 0,
+                label = label_text,
+                hjust = 0,
+                size = 4,
+                color = "black"
+            )
+        plot_list[[item]] <- plot_cor
+        plot_list_trend[[item]] <- plot_scale_trends
+    }
+    IT_adequacy_effort_list[[var]] <- plot_list
+    IT_adequacy_effort_trends[[var]] <- plot_list_trend
+}
+
+```
+
+```{r}
+#| label: IT_cor_adequacy_cor_plot
+#| fig-cap: Plots of the correlation between item-total correlation and scale points adequacy
+#| echo: false
+#| fig-width: 16
+#| fig-height: 16
+
+
+grid.arrange(
+    grobs = IT_adequacy_effort_list[["Adequacy"]],
+    ncol = 3
+)
+
+```
+
+```{r}
+#| label: IT_cor_adequacy_trend_plot
+#| fig-cap: Trends of item-total correlation and scale points adequacy per scale points
+#| echo: false
+#| fig-width: 16
+#| fig-height: 16
+
+grid.arrange(
+    grobs = IT_adequacy_effort_trends[["Adequacy"]],
+    ncol = 3
+)
+```
+
+
+
+
+```{r}
+#| label: calculate_pomp_scores
+
+# Calculate POMP scores using lapply 
+item_pomp_scores_list <- lapply(seq_along(full_data), function(j) { 
+    current_data <- full_data[[j]] 
+     # Set the score range dynamically
+    if (j == 1) {
+        min_score <- 0
+        max_score <- 3
+    } else {
+        min_score <- 0
+        max_score <- j - 1
+    }
+
+    # Calculate POMP scores 
+    pomp_scores <- sapply(phq_item_names, function(item) { 
+        mean_score <- mean(current_data[[item]], na.rm = TRUE) 
+        (mean_score - min_score) / (max_score - min_score) * 100 
+    }) 
+
+    data.frame(Item = phq_item_names, Score = pomp_scores, Dataset = j) 
+}) 
+
+adequacy_pomp_scores_df_temp <- do.call(rbind, item_pomp_scores_list)
+
+# Combine all POMP scores into one dataframe 
+adequacy_pomp_scores_df <- data.frame(Scale = 1:20)  # Initialize an empty data frame
+
+for(i in phq_item_names) {
+    temp_df <- as.data.frame(adequacy_pomp_scores_df_temp[adequacy_pomp_scores_df_temp$Item == i, c("Score")])
+    colnames(temp_df) <- paste("POMP", i, sep = "_")
+    adequacy_pomp_scores_df <- cbind(adequacy_pomp_scores_df, temp_df)
+}
+
+adequacy_pomp_scores_df <- cbind(adequacy_pomp_scores_df, adequacy_effort_means[effort_vars])
+
+#rescale POMP columns in adequacy_pomp_scores_df
+POMP_scaled <- adequacy_pomp_scores_df %>%
+    mutate(across(-all_of("Scale"), scale_to_0_1))
+
+```
+
+
+
+```{r}
+#| label: plots_for_POMP_adequacy_effort
+
+POMP_adequacy_effort_list <- list()
+POMP_adequacy_effort_trends <- list()
+POMP_col_names <- paste("POMP", phq_item_names, sep = "_")
+effort_vars <- c("Adequacy", "Cognitive_Effort", "Emotional_Effort")
+for(var in effort_vars){
+    plot_list <- list()
+    plot_list_trend <- list()
+    for(item in POMP_col_names){
+        data_temp <- POMP_scaled[,c("Scale", item, var)]
+        data_temp <- data_temp[-1,]
+        data_temp$Difference <- data_temp[[var]] - data_temp[[item]]
+        #convert to long
+        data_temp_long <- melt(data_temp, id.vars = c("Scale"), 
+                               variable.name = "Variable", value.name = "Value")
+        
+        plot_scale_trends <- ggplot(data = data_temp_long, aes(x = Scale, y = Value, color = Variable, group = Variable)) +
+            geom_point(size = 1) +
+            geom_line(linewidth = 1) + 
+            scale_x_continuous(breaks = seq(2, 20, 1)) +
+            labs(x = "Scale", y = paste(var, "Effort Value", sep = " "), title = toTitleCase(phq_item_names[which(POMP_col_names == item)])) +
+            scale_color_manual(values = c("blue", "green", "red")) +  # Define the colors manually
+            theme(legend.position = "bottom")
+        
+        # Create the label text
+        label_text <- paste0(
+            "Correlation: ", round(cor_temp_est, 2),
+            "\nCI: [", round(cor_temp_lower, 2), ", ", round(cor_temp_upper, 2), "]")
+        data_cor_temp <- data_temp
+        colnames(data_cor_temp) <- c("Scale", "POMP", "Effort", "Difference")
+        
+        plot_cor <- ggplot(data = data_cor_temp, aes(x = Effort, y = POMP, color = Scale)) +
+            geom_point() +
+            labs(x = paste(var, "Effort Value", sep = " "), y = "Item Total Correlation",
+                 title = toTitleCase(phq_item_names[which(POMP_col_names == item)])) +
+            #remove legend
+            theme(legend.position = ifelse(item == "phq1", "right", "none")) +
+            annotate(
+                "text",
+                x = 0,
+                y = 0,
+                label = label_text,
+                hjust = 0,
+                size = 4,
+                color = "black"
+            )
+        plot_list[[item]] <- plot_cor
+        plot_list_trend[[item]] <- plot_scale_trends
+    }
+    POMP_adequacy_effort_list[[var]] <- plot_list
+    POMP_adequacy_effort_trends[[var]] <- plot_list_trend
+}
+
+```
+
+```{r}
+#| label: POMP_adequacy_cor_plot
+#| fig-cap: Plots of the correlation between item-total correlation and scale points adequacy
+#| echo: false
+#| fig-width: 16
+#| fig-height: 16
+
+
+grid.arrange(
+    grobs = POMP_adequacy_effort_list[["Adequacy"]],
+    ncol = 3
+)
+
+```
+
+```{r}
+#| label: POMP_adequacy_trend_plot
+#| fig-cap: Trends of item-total correlation and scale points adequacy per scale points
+#| echo: false
+#| fig-width: 16
+#| fig-height: 16
+
+grid.arrange(
+    grobs = POMP_adequacy_effort_trends[["Adequacy"]],
+    ncol = 3
+)
+```
+
+
+
+
+
